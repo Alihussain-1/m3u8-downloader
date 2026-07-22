@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>M3U8 Downloader</title>
+
+<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+
+<style>
+    body{
+        margin:0;
+        background:#111;
+        font-family:Arial;
+        color:white;
+        display:flex;
+        flex-direction:column;
+        align-items:center;
+        padding:20px;
+    }
+
+    h1{
+        margin-bottom:20px;
+    }
+
+    .controls{
+        width:90%;
+        max-width:900px;
+        display:flex;
+        gap:10px;
+        margin-bottom:12px;
+        flex-wrap:wrap;
+    }
+
+    input{
+        flex:1;
+        min-width:150px;
+        padding:12px;
+        border:none;
+        border-radius:8px;
+        font-size:16px;
+    }
+
+    button{
+        padding:12px 20px;
+        border:none;
+        border-radius:8px;
+        background:#00bcd4;
+        color:white;
+        cursor:pointer;
+        font-size:16px;
+    }
+
+    button:disabled{
+        background:#555;
+        cursor:not-allowed;
+    }
+
+    video{
+        width:90%;
+        max-width:900px;
+        background:black;
+        border-radius:12px;
+    }
+
+    .status{
+        margin-top:10px;
+        color:#ccc;
+        width:90%;
+        max-width:900px;
+        white-space:pre-wrap;
+    }
+
+    .bar{
+        width:90%;
+        max-width:900px;
+        height:8px;
+        background:#333;
+        border-radius:4px;
+        margin-top:10px;
+        overflow:hidden;
+        display:none;
+    }
+
+    .bar-fill{
+        height:100%;
+        width:0%;
+        background:#00bcd4;
+        transition:width 0.2s;
+    }
+
+    .note{
+        margin-top:16px;
+        color:#888;
+        font-size:13px;
+        width:90%;
+        max-width:900px;
+    }
+</style>
+</head>
+
+<body>
+
+<h1>M3U8 Downloader</h1>
+
+<div class="controls">
+    <input
+        type="text"
+        id="urlInput"
+        placeholder="Paste .m3u8 URL here"
+    >
+</div>
+
+<div class="controls">
+    <input
+        type="text"
+        id="filenameInput"
+        placeholder="Output filename (default: video)"
+    >
+
+    <button id="playBtn" onclick="loadVideo()">Play</button>
+    <button id="downloadBtn" onclick="downloadVideo()">Download MP4</button>
+    <button id="idmBtn" onclick="showLink()">Get IDM Link</button>
+</div>
+
+<video id="video" controls></video>
+
+<div class="status" id="status"></div>
+
+<div class="bar" id="bar">
+    <div class="bar-fill" id="barFill"></div>
+</div>
+
+<div id="linkBox" style="display:none; width:90%; max-width:900px; margin-top:14px;">
+    <a id="idmLink" href="#" target="_blank" style="color:#00bcd4; word-break:break-all;">stream link</a>
+    <div class="note" style="margin-top:8px;">
+        Right-click that link and pick "Download with IDM" (or a similar name in your extension's menu).
+        IDM reads .m3u8 directly and grabs every segment itself.
+    </div>
+</div>
+
+<div class="note">
+    "Download MP4" handles fMP4 streams (init segment + segments, saved directly as a valid .mp4) and AES-128 encrypted streams (decrypted before saving) as well as plain .ts streams (remuxed to .mp4 with ffmpeg, no re-encoding).
+    If a stream uses a scheme this can't decrypt (e.g. SAMPLE-AES, DRM), it will say so instead of saving a broken file.
+</div>
+
+<script type="module">
+    import { FFmpeg } from "https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js";
+    import { toBlobURL } from "https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm/index.js";
+
+    let hls;
+    let ffmpeg;
+    let ffmpegReady = false;
+    const keyCache = new Map();
+
+    window.loadVideo = function () {
+        const video = document.getElementById('video');
+        const url = document.getElementById('urlInput').value.trim();
+        const status = document.getElementById('status');
+
+        if (!url) {
+            status.innerText = 'Please enter a URL';
+            return;
+        }
+
+        status.innerText = 'Loading...';
+
+        if (hls) {
+            hls.destroy();
+        }
+
+        if (Hls.isSupported()) {
+            hls = new Hls();
+            hls.loadSource(url);
+            hls.attachMedia(video);
+
+            hls.on(Hls.Events.MANIFEST_PARSED, function () {
+                video.play();
+                status.innerText = 'Playing';
+            });
+
+            hls.on(Hls.Events.ERROR, function (event, data) {
+                status.innerText = 'Error: ' + data.details;
+                console.log(data);
+            });
+
+        } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+            video.src = url;
+            video.addEventListener('loadedmetadata', function () {
+                video.play();
+                status.innerText = 'Playing';
+            });
+
+        } else {
+            status.innerText = 'HLS not supported in this browser';
+        }
+    };
+
+    window.showLink = function () {
+        const url = document.getElementById('urlInput').value.trim();
+        const status = document.getElementById('status');
+        const linkBox = document.getElementById('linkBox');
+        const idmLink = document.getElementById('idmLink');
+
+        if (!url) {
+            status.innerText = 'Please enter a URL';
+            return;
+        }
+
+        idmLink.href = url;
+        idmLink.innerText = url;
+        linkBox.style.display = 'block';
+        status.innerText = 'Link ready below — right-click it to grab with IDM';
+    };
+
+    function resolveUrl(base, relative) {
+        return new URL(relative, base).href;
+    }
+
+    async function fetchText(url) {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error('Failed to fetch: ' + url);
+        return res.text();
+    }
+
+    function hexToBytes(hex) {
+        hex = hex.replace(/^0x/i, '');
+        const bytes = new Uint8Array(hex.length / 2);
+        for (let i = 0; i < bytes.length; i++) {
+            bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
+        }
+        return bytes;
+    }
+
+    function sequenceToIV(seq) {
+        const iv = new Uint8Array(16);
+        new DataView(iv.buffer).setUint32(12, seq);
+        return iv;
+    }
+
+    // Parses a media playlist (following master -> variant if needed) into
+    // a plan: the list of segments (each with its decryption key/IV if any)
+    // plus the fMP4 init segment URI if present.
+    async function getSegmentPlan(m3u8Url) {
+        const text = await fetchText(m3u8Url);
+        const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+
+        const variant = lines.find(l => !l.startsWith('#') && l.includes('.m3u8'));
+        if (text.includes('#EXT-X-STREAM-INF') && variant) {
+            return getSegmentPlan(resolveUrl(m3u8Url, variant));
+        }
+
+        let mediaSequence = 0;
+        let currentKey = null;
+        let mapUri = null;
+        let sampleAesDetected = false;
+        const segments = [];
+
+        for (const line of lines) {
+            if (line.startsWith('#EXT-X-MEDIA-SEQUENCE:')) {
+                mediaSequence = parseInt(line.split(':')[1], 10) || 0;
+
+            } else if (line.startsWith('#EXT-X-KEY:')) {
+                const methodMatch = line.match(/METHOD=([^,]+)/);
+                const uriMatch = line.match(/URI="([^"]+)"/);
+                const ivMatch = line.match(/IV=(0x[0-9A-Fa-f]+)/);
+
+                if (!methodMatch || methodMatch[1] === 'NONE') {
+                    currentKey = null;
+                } else if (methodMatch[1] !== 'AES-128') {
+                    sampleAesDetected = true;
+                } else if (uriMatch) {
+                    currentKey = {
+                        uri: resolveUrl(m3u8Url, uriMatch[1]),
+                        iv: ivMatch ? ivMatch[1] : null
+                    };
+                }
+
+            } else if (line.startsWith('#EXT-X-MAP:')) {
+                const uriMatch = line.match(/URI="([^"]+)"/);
+                if (uriMatch) mapUri = resolveUrl(m3u8Url, uriMatch[1]);
+
+            } else if (!line.startsWith('#')) {
+                segments.push({ url: resolveUrl(m3u8Url, line), key: currentKey, sequence: mediaSequence });
+                mediaSequence++;
+            }
+        }
+
+        if (sampleAesDetected) {
+            throw new Error('This stream uses SAMPLE-AES or DRM encryption, which this tool cannot decrypt.');
+        }
+
+        return { segments, mapUri };
+    }
+
+    async function getKeyBytes(uri) {
+        if (keyCache.has(uri)) return keyCache.get(uri);
+        const res = await fetch(uri);
+        if (!res.ok) throw new Error('Failed to fetch decryption key');
+        const buf = await res.arrayBuffer();
+        keyCache.set(uri, buf);
+        return buf;
+    }
+
+    async function fetchSegmentBytes(seg) {
+        const res = await fetch(seg.url);
+        if (!res.ok) throw new Error('Failed to fetch segment');
+        const buf = await res.arrayBuffer();
+
+        if (!seg.key) return new Uint8Array(buf);
+
+        const keyBuf = await getKeyBytes(seg.key.uri);
+        const iv = seg.key.iv ? hexToBytes(seg.key.iv) : sequenceToIV(seg.sequence);
+        const cryptoKey = await crypto.subtle.importKey('raw', keyBuf, { name: 'AES-CBC' }, false, ['decrypt']);
+        const decrypted = await crypto.subtle.decrypt({ name: 'AES-CBC', iv }, cryptoKey, buf);
+        return new Uint8Array(decrypted);
+    }
+
+    async function ensureFfmpeg(status) {
+        if (ffmpegReady) return;
+        status.innerText = 'Loading converter (first time only)...';
+        ffmpeg = new FFmpeg();
+        ffmpeg.on('log', ({ message }) => console.log('[ffmpeg]', message));
+        const baseURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/esm';
+        await ffmpeg.load({
+            coreURL: await toBlobURL(baseURL + '/ffmpeg-core.js', 'text/javascript'),
+            wasmURL: await toBlobURL(baseURL + '/ffmpeg-core.wasm', 'application/wasm')
+        });
+        ffmpegReady = true;
+    }
+
+    function triggerDownload(blob, filename) {
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+    }
+
+    function getOutputName() {
+        const raw = document.getElementById('filenameInput').value.trim();
+        const cleaned = raw.replace(/[\\/:*?"<>|]/g, '').replace(/\.[^.]*$/, '');
+        return cleaned || 'video';
+    }
+
+    window.downloadVideo = async function () {
+        const url = document.getElementById('urlInput').value.trim();
+        const status = document.getElementById('status');
+        const btn = document.getElementById('downloadBtn');
+        const bar = document.getElementById('bar');
+        const barFill = document.getElementById('barFill');
+        const outName = getOutputName();
+
+        if (!url) {
+            status.innerText = 'Please enter a URL';
+            return;
+        }
+
+        btn.disabled = true;
+        bar.style.display = 'block';
+        barFill.style.width = '0%';
+
+        try {
+            status.innerText = 'Reading playlist...';
+            const plan = await getSegmentPlan(url);
+            const segs = plan.segments;
+            if (!segs.length) throw new Error('No segments found in playlist');
+
+            const chunks = [];
+
+            if (plan.mapUri) {
+                status.innerText = 'Downloading init segment...';
+                const initRes = await fetch(plan.mapUri);
+                if (!initRes.ok) throw new Error('Failed to fetch init segment');
+                chunks.push(new Uint8Array(await initRes.arrayBuffer()));
+            }
+
+            for (let i = 0; i < segs.length; i++) {
+                status.innerText = (segs[i].key ? 'Downloading + decrypting' : 'Downloading') +
+                    ' segment ' + (i + 1) + ' of ' + segs.length;
+                chunks.push(await fetchSegmentBytes(segs[i]));
+                barFill.style.width = Math.round(((i + 1) / segs.length) * 70) + '%';
+            }
+
+            let total = 0;
+            chunks.forEach(c => total += c.length);
+            const combined = new Uint8Array(total);
+            let offset = 0;
+            chunks.forEach(c => { combined.set(c, offset); offset += c.length; });
+
+            if (plan.mapUri) {
+                // fMP4/CMAF: init segment + media segments concatenated in order
+                // is already a valid fragmented MP4 file, no remux needed.
+                barFill.style.width = '100%';
+                triggerDownload(new Blob([combined], { type: 'video/mp4' }), outName + '.mp4');
+                status.innerText = 'Done — saved as ' + outName + '.mp4';
+                return;
+            }
+
+            try {
+                await ensureFfmpeg(status);
+                status.innerText = 'Converting to MP4...';
+                barFill.style.width = '85%';
+
+                await ffmpeg.writeFile('input.ts', combined);
+                await ffmpeg.exec(['-i', 'input.ts', '-c', 'copy', 'output.mp4']);
+                const data = await ffmpeg.readFile('output.mp4');
+
+                barFill.style.width = '100%';
+                triggerDownload(new Blob([data.buffer], { type: 'video/mp4' }), outName + '.mp4');
+                status.innerText = 'Done — saved as ' + outName + '.mp4';
+
+            } catch (convErr) {
+                console.log('MP4 conversion failed:', convErr);
+                barFill.style.width = '100%';
+                triggerDownload(new Blob([combined], { type: 'video/mp2t' }), outName + '.ts');
+                status.innerText = 'MP4 conversion failed (' + (convErr.message || convErr) +
+                    '), saved as ' + outName + '.ts instead — check the browser console for details';
+            }
+
+        } catch (err) {
+            status.innerText = 'Error: ' + err.message;
+            console.log(err);
+        } finally {
+            btn.disabled = false;
+        }
+    };
+</script>
+
+</body>
+</html>
