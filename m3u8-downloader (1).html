@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>M3U8 Downloader</title>
+
+<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+
+<style>
+    body{
+        margin:0;
+        background:#111;
+        font-family:Arial;
+        color:white;
+        display:flex;
+        flex-direction:column;
+        align-items:center;
+        padding:20px;
+    }
+
+    h1{
+        margin-bottom:20px;
+    }
+
+    .controls{
+        width:90%;
+        max-width:900px;
+        display:flex;
+        gap:10px;
+        margin-bottom:20px;
+        flex-wrap:wrap;
+    }
+
+    input{
+        flex:1;
+        min-width:200px;
+        padding:12px;
+        border:none;
+        border-radius:8px;
+        font-size:16px;
+    }
+
+    button{
+        padding:12px 20px;
+        border:none;
+        border-radius:8px;
+        background:#00bcd4;
+        color:white;
+        cursor:pointer;
+        font-size:16px;
+    }
+
+    button:disabled{
+        background:#555;
+        cursor:not-allowed;
+    }
+
+    video{
+        width:90%;
+        max-width:900px;
+        background:black;
+        border-radius:12px;
+    }
+
+    .status{
+        margin-top:10px;
+        color:#ccc;
+        width:90%;
+        max-width:900px;
+    }
+
+    .bar{
+        width:90%;
+        max-width:900px;
+        height:8px;
+        background:#333;
+        border-radius:4px;
+        margin-top:10px;
+        overflow:hidden;
+        display:none;
+    }
+
+    .bar-fill{
+        height:100%;
+        width:0%;
+        background:#00bcd4;
+        transition:width 0.2s;
+    }
+
+    .note{
+        margin-top:16px;
+        color:#888;
+        font-size:13px;
+        width:90%;
+        max-width:900px;
+    }
+</style>
+</head>
+
+<body>
+
+<h1>M3U8 Downloader</h1>
+
+<div class="controls">
+    <input
+        type="text"
+        id="urlInput"
+        placeholder="Paste .m3u8 URL here"
+    >
+
+    <button onclick="loadVideo()">Play</button>
+    <button id="downloadBtn" onclick="downloadVideo()">Download</button>
+</div>
+
+<video id="video" controls></video>
+
+<div class="status" id="status"></div>
+
+<div class="bar" id="bar">
+    <div class="bar-fill" id="barFill"></div>
+</div>
+
+<div class="note">
+    Downloads save as a single .ts file (segments joined together). Plays great in VLC.
+    Browsers can't build a native .mp4 without a full transcoder, so it won't preview inline in Chrome/Safari — just play it in VLC or any media player.
+</div>
+
+<script>
+    let hls;
+
+    function loadVideo() {
+        const video = document.getElementById('video');
+        const url = document.getElementById('urlInput').value.trim();
+        const status = document.getElementById('status');
+
+        if (!url) {
+            status.innerText = 'Please enter a URL';
+            return;
+        }
+
+        status.innerText = 'Loading...';
+
+        if (hls) {
+            hls.destroy();
+        }
+
+        if (Hls.isSupported()) {
+            hls = new Hls();
+            hls.loadSource(url);
+            hls.attachMedia(video);
+
+            hls.on(Hls.Events.MANIFEST_PARSED, function () {
+                video.play();
+                status.innerText = 'Playing';
+            });
+
+            hls.on(Hls.Events.ERROR, function(event, data) {
+                status.innerText = 'Error: ' + data.details;
+                console.log(data);
+            });
+
+        } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+            video.src = url;
+            video.addEventListener('loadedmetadata', function () {
+                video.play();
+                status.innerText = 'Playing';
+            });
+
+        } else {
+            status.innerText = 'HLS not supported in this browser';
+        }
+    }
+
+    function resolveUrl(base, relative) {
+        return new URL(relative, base).href;
+    }
+
+    async function fetchText(url) {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error('Failed to fetch: ' + url);
+        return res.text();
+    }
+
+    async function getSegmentList(m3u8Url) {
+        const text = await fetchText(m3u8Url);
+        const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+
+        // If this is a master playlist (points to variant streams), pick the first variant
+        const variant = lines.find(l => !l.startsWith('#') && l.includes('.m3u8'));
+        if (text.includes('#EXT-X-STREAM-INF') && variant) {
+            const variantUrl = resolveUrl(m3u8Url, variant);
+            return getSegmentList(variantUrl);
+        }
+
+        const segments = lines
+            .filter(l => !l.startsWith('#'))
+            .map(l => resolveUrl(m3u8Url, l));
+
+        return segments;
+    }
+
+    async function downloadVideo() {
+        const url = document.getElementById('urlInput').value.trim();
+        const status = document.getElementById('status');
+        const btn = document.getElementById('downloadBtn');
+        const bar = document.getElementById('bar');
+        const barFill = document.getElementById('barFill');
+
+        if (!url) {
+            status.innerText = 'Please enter a URL';
+            return;
+        }
+
+        btn.disabled = true;
+        bar.style.display = 'block';
+        barFill.style.width = '0%';
+        status.innerText = 'Reading playlist...';
+
+        try {
+            const segments = await getSegmentList(url);
+
+            if (!segments.length) {
+                throw new Error('No segments found in playlist');
+            }
+
+            const chunks = [];
+            for (let i = 0; i < segments.length; i++) {
+                status.innerText = 'Downloading segment ' + (i + 1) + ' of ' + segments.length;
+                const res = await fetch(segments[i]);
+                if (!res.ok) throw new Error('Failed on segment ' + (i + 1));
+                chunks.push(await res.blob());
+                barFill.style.width = Math.round(((i + 1) / segments.length) * 100) + '%';
+            }
+
+            status.innerText = 'Combining segments...';
+            const finalBlob = new Blob(chunks, { type: 'video/mp2t' });
+
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(finalBlob);
+            a.download = 'video.ts';
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+
+            status.innerText = 'Done — ' + segments.length + ' segments saved as video.ts';
+
+        } catch (err) {
+            status.innerText = 'Error: ' + err.message;
+            console.log(err);
+        } finally {
+            btn.disabled = false;
+        }
+    }
+</script>
+
+</body>
+</html>
