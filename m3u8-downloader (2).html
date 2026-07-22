@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>M3U8 Downloader</title>
+
+<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+
+<style>
+    body{
+        margin:0;
+        background:#111;
+        font-family:Arial;
+        color:white;
+        display:flex;
+        flex-direction:column;
+        align-items:center;
+        padding:20px;
+    }
+
+    h1{
+        margin-bottom:20px;
+    }
+
+    .controls{
+        width:90%;
+        max-width:900px;
+        display:flex;
+        gap:10px;
+        margin-bottom:20px;
+        flex-wrap:wrap;
+    }
+
+    input{
+        flex:1;
+        min-width:200px;
+        padding:12px;
+        border:none;
+        border-radius:8px;
+        font-size:16px;
+    }
+
+    button{
+        padding:12px 20px;
+        border:none;
+        border-radius:8px;
+        background:#00bcd4;
+        color:white;
+        cursor:pointer;
+        font-size:16px;
+    }
+
+    button:disabled{
+        background:#555;
+        cursor:not-allowed;
+    }
+
+    video{
+        width:90%;
+        max-width:900px;
+        background:black;
+        border-radius:12px;
+    }
+
+    .status{
+        margin-top:10px;
+        color:#ccc;
+        width:90%;
+        max-width:900px;
+    }
+
+    .bar{
+        width:90%;
+        max-width:900px;
+        height:8px;
+        background:#333;
+        border-radius:4px;
+        margin-top:10px;
+        overflow:hidden;
+        display:none;
+    }
+
+    .bar-fill{
+        height:100%;
+        width:0%;
+        background:#00bcd4;
+        transition:width 0.2s;
+    }
+
+    .note{
+        margin-top:16px;
+        color:#888;
+        font-size:13px;
+        width:90%;
+        max-width:900px;
+    }
+</style>
+</head>
+
+<body>
+
+<h1>M3U8 Downloader</h1>
+
+<div class="controls">
+    <input
+        type="text"
+        id="urlInput"
+        placeholder="Paste .m3u8 URL here"
+    >
+
+    <button onclick="loadVideo()">Play</button>
+    <button onclick="showLink()">Get IDM Link</button>
+</div>
+
+<video id="video" controls></video>
+
+<div class="status" id="status"></div>
+
+<div id="linkBox" style="display:none; width:90%; max-width:900px; margin-top:14px;">
+    <a id="idmLink" href="#" target="_blank" style="color:#00bcd4; word-break:break-all;">stream link</a>
+    <div class="note" style="margin-top:8px;">
+        Right-click that link and pick "Download with IDM" (or a similar name in your extension's menu).
+        IDM understands .m3u8 links directly — it will fetch every segment itself and hand you back a normal .mp4.
+    </div>
+</div>
+
+<div class="note">
+    A JS-built download inside the page (a "blob") never touches the network as a real file, so IDM can't see or catch it — that only works for real links.
+    Two ways to get IDM to grab this stream: click Play and watch for IDM's small download arrow to appear over the video (its built-in stream sniffer), or use the link above and download it directly through IDM.
+</div>
+
+<script>
+    let hls;
+
+    function loadVideo() {
+        const video = document.getElementById('video');
+        const url = document.getElementById('urlInput').value.trim();
+        const status = document.getElementById('status');
+
+        if (!url) {
+            status.innerText = 'Please enter a URL';
+            return;
+        }
+
+        status.innerText = 'Loading...';
+
+        if (hls) {
+            hls.destroy();
+        }
+
+        if (Hls.isSupported()) {
+            hls = new Hls();
+            hls.loadSource(url);
+            hls.attachMedia(video);
+
+            hls.on(Hls.Events.MANIFEST_PARSED, function () {
+                video.play();
+                status.innerText = 'Playing';
+            });
+
+            hls.on(Hls.Events.ERROR, function(event, data) {
+                status.innerText = 'Error: ' + data.details;
+                console.log(data);
+            });
+
+        } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+            video.src = url;
+            video.addEventListener('loadedmetadata', function () {
+                video.play();
+                status.innerText = 'Playing';
+            });
+
+        } else {
+            status.innerText = 'HLS not supported in this browser';
+        }
+    }
+
+    function showLink() {
+        const url = document.getElementById('urlInput').value.trim();
+        const status = document.getElementById('status');
+        const linkBox = document.getElementById('linkBox');
+        const idmLink = document.getElementById('idmLink');
+
+        if (!url) {
+            status.innerText = 'Please enter a URL';
+            return;
+        }
+
+        idmLink.href = url;
+        idmLink.innerText = url;
+        linkBox.style.display = 'block';
+        status.innerText = 'Link ready below — right-click it to grab with IDM';
+    }
+</script>
+
+</body>
+</html>
