@@ -109,8 +109,9 @@
         placeholder="Paste .m3u8 URL here"
     >
 
-    <button onclick="loadVideo()">Play</button>
-    <button id="downloadBtn" onclick="downloadVideo()">Download</button>
+    <button id="playBtn" onclick="loadVideo()">Play</button>
+    <button id="downloadBtn" onclick="downloadVideo()">Download MP4</button>
+    <button id="idmBtn" onclick="showLink()">Get IDM Link</button>
 </div>
 
 <video id="video" controls></video>
@@ -121,15 +122,28 @@
     <div class="bar-fill" id="barFill"></div>
 </div>
 
-<div class="note">
-    Downloads save as a single .ts file (segments joined together). Plays great in VLC.
-    Browsers can't build a native .mp4 without a full transcoder, so it won't preview inline in Chrome/Safari — just play it in VLC or any media player.
+<div id="linkBox" style="display:none; width:90%; max-width:900px; margin-top:14px;">
+    <a id="idmLink" href="#" target="_blank" style="color:#00bcd4; word-break:break-all;">stream link</a>
+    <div class="note" style="margin-top:8px;">
+        Right-click that link and pick "Download with IDM" (or a similar name in your extension's menu).
+        IDM reads .m3u8 directly and grabs every segment itself.
+    </div>
 </div>
 
-<script>
-    let hls;
+<div class="note">
+    "Download MP4" does everything in your browser: it pulls every segment, then remuxes them into a real .mp4 (repackaging, not re-encoding, so it's fast and full quality). The converter is about 25MB and only downloads once per session.
+    If you'd rather let IDM handle the whole thing itself, use "Get IDM Link" instead.
+</div>
 
-    function loadVideo() {
+<script type="module">
+    import { FFmpeg } from "https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js";
+    import { toBlobURL } from "https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm/index.js";
+
+    let hls;
+    let ffmpeg;
+    let ffmpegReady = false;
+
+    window.loadVideo = function () {
         const video = document.getElementById('video');
         const url = document.getElementById('urlInput').value.trim();
         const status = document.getElementById('status');
@@ -155,7 +169,7 @@
                 status.innerText = 'Playing';
             });
 
-            hls.on(Hls.Events.ERROR, function(event, data) {
+            hls.on(Hls.Events.ERROR, function (event, data) {
                 status.innerText = 'Error: ' + data.details;
                 console.log(data);
             });
@@ -170,7 +184,24 @@
         } else {
             status.innerText = 'HLS not supported in this browser';
         }
-    }
+    };
+
+    window.showLink = function () {
+        const url = document.getElementById('urlInput').value.trim();
+        const status = document.getElementById('status');
+        const linkBox = document.getElementById('linkBox');
+        const idmLink = document.getElementById('idmLink');
+
+        if (!url) {
+            status.innerText = 'Please enter a URL';
+            return;
+        }
+
+        idmLink.href = url;
+        idmLink.innerText = url;
+        linkBox.style.display = 'block';
+        status.innerText = 'Link ready below — right-click it to grab with IDM';
+    };
 
     function resolveUrl(base, relative) {
         return new URL(relative, base).href;
@@ -186,21 +217,37 @@
         const text = await fetchText(m3u8Url);
         const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
 
-        // If this is a master playlist (points to variant streams), pick the first variant
         const variant = lines.find(l => !l.startsWith('#') && l.includes('.m3u8'));
         if (text.includes('#EXT-X-STREAM-INF') && variant) {
             const variantUrl = resolveUrl(m3u8Url, variant);
             return getSegmentList(variantUrl);
         }
 
-        const segments = lines
-            .filter(l => !l.startsWith('#'))
-            .map(l => resolveUrl(m3u8Url, l));
-
-        return segments;
+        return lines.filter(l => !l.startsWith('#')).map(l => resolveUrl(m3u8Url, l));
     }
 
-    async function downloadVideo() {
+    async function ensureFfmpeg(status) {
+        if (ffmpegReady) return;
+        status.innerText = 'Loading converter (first time only)...';
+        ffmpeg = new FFmpeg();
+        const baseURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/esm';
+        await ffmpeg.load({
+            coreURL: await toBlobURL(baseURL + '/ffmpeg-core.js', 'text/javascript'),
+            wasmURL: await toBlobURL(baseURL + '/ffmpeg-core.wasm', 'application/wasm')
+        });
+        ffmpegReady = true;
+    }
+
+    function triggerDownload(blob, filename) {
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+    }
+
+    window.downloadVideo = async function () {
         const url = document.getElementById('urlInput').value.trim();
         const status = document.getElementById('status');
         const btn = document.getElementById('downloadBtn');
@@ -215,35 +262,46 @@
         btn.disabled = true;
         bar.style.display = 'block';
         barFill.style.width = '0%';
-        status.innerText = 'Reading playlist...';
 
         try {
+            status.innerText = 'Reading playlist...';
             const segments = await getSegmentList(url);
-
-            if (!segments.length) {
-                throw new Error('No segments found in playlist');
-            }
+            if (!segments.length) throw new Error('No segments found in playlist');
 
             const chunks = [];
             for (let i = 0; i < segments.length; i++) {
                 status.innerText = 'Downloading segment ' + (i + 1) + ' of ' + segments.length;
                 const res = await fetch(segments[i]);
                 if (!res.ok) throw new Error('Failed on segment ' + (i + 1));
-                chunks.push(await res.blob());
-                barFill.style.width = Math.round(((i + 1) / segments.length) * 100) + '%';
+                chunks.push(new Uint8Array(await res.arrayBuffer()));
+                barFill.style.width = Math.round(((i + 1) / segments.length) * 70) + '%';
             }
 
-            status.innerText = 'Combining segments...';
-            const finalBlob = new Blob(chunks, { type: 'video/mp2t' });
+            let total = 0;
+            chunks.forEach(c => total += c.length);
+            const tsData = new Uint8Array(total);
+            let offset = 0;
+            chunks.forEach(c => { tsData.set(c, offset); offset += c.length; });
 
-            const a = document.createElement('a');
-            a.href = URL.createObjectURL(finalBlob);
-            a.download = 'video.ts';
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
+            try {
+                await ensureFfmpeg(status);
+                status.innerText = 'Converting to MP4...';
+                barFill.style.width = '85%';
 
-            status.innerText = 'Done — ' + segments.length + ' segments saved as video.ts';
+                await ffmpeg.writeFile('input.ts', tsData);
+                await ffmpeg.exec(['-i', 'input.ts', '-c', 'copy', 'output.mp4']);
+                const data = await ffmpeg.readFile('output.mp4');
+
+                barFill.style.width = '100%';
+                triggerDownload(new Blob([data.buffer], { type: 'video/mp4' }), 'video.mp4');
+                status.innerText = 'Done — saved as video.mp4';
+
+            } catch (convErr) {
+                console.log('MP4 conversion failed, falling back to .ts', convErr);
+                barFill.style.width = '100%';
+                triggerDownload(new Blob([tsData], { type: 'video/mp2t' }), 'video.ts');
+                status.innerText = 'MP4 conversion failed, saved as video.ts instead (plays fine in VLC)';
+            }
 
         } catch (err) {
             status.innerText = 'Error: ' + err.message;
@@ -251,7 +309,7 @@
         } finally {
             btn.disabled = false;
         }
-    }
+    };
 </script>
 
 </body>
